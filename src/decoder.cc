@@ -19,7 +19,7 @@ using namespace node;
 #define VIDEO_PICTURE_QUEUE_SIZE 1
 
 namespace libav_decoder {
-  int frameIndex, frameDecoded, hasDecodedFrame;
+  int frameIndex, frameDecoded, hasDecodedFrame, queueReady;
   uint64_t totalFrames;
   AVFormatContext *pFormatCtx = NULL;
   int             i, videoStream, audioStream;
@@ -78,10 +78,10 @@ namespace libav_decoder {
 
         int i=0;
         for(;;) {
-          // if(shouldQuit){
-          //   SetErrorMessage("Quitting...");
-          //   break;
-          // }
+          if(shouldQuit==1){
+            SetErrorMessage("Quitting...");
+            break;
+          }
           if(shouldQuit){
             fprintf(stderr, "quit ivoked!\n");
             break;
@@ -119,6 +119,7 @@ namespace libav_decoder {
 
       }else{
         fprintf(stderr, "no more packets...\n");
+        avformat_close_input(&pFormatCtx);
       }
 
 
@@ -150,28 +151,9 @@ namespace libav_decoder {
 
       v8::Local<v8::Value> argv[] = {obj};
       callback->Call(1, argv);
-      // if(shouldQuit){
-      //   v8::Local<v8::Value> argv[] = {
-      //     Nan::New<Integer>(-1)
-      //   };
-      //   callback->Call(2, argv);
-      // }else{
-      //   v8::Local<v8::Value> argv[] = {
-      //     Nan::CopyBuffer((char *)yuv->avY, yuv->size_y).ToLocalChecked(),
-      //     Nan::CopyBuffer((char *)yuv->avU, yuv->size_u).ToLocalChecked(),
-      //     Nan::CopyBuffer((char *)yuv->avV, yuv->size_v).ToLocalChecked(),
-      //     Nan::New<Integer>(yuv->pitchY),
-      //     Nan::New<Integer>(yuv->pitchU),
-      //     Nan::New<Integer>(yuv->pitchV),
-      //     Nan::New<Integer>(videoq.nb_packets),
-      //     Nan::New<Number>(vpts)
-      //   };
-      //   callback->Call(8, argv);
-      //   delete yuv;
-      // }
     }
     void Destroy(){
-
+      // fprintf(stderr, "destroy reader\n");
     }
 
 
@@ -179,9 +161,11 @@ namespace libav_decoder {
 
   class DecodeWorker : public AsyncProgressWorker {
    public:
-    DecodeWorker(Callback *callback, Callback *progress)
+    DecodeWorker(
+        Callback *callback
+      , Callback *progress)
       : AsyncProgressWorker(callback), progress(progress) {}
-    ~DecodeWorker() {}
+    ~DecodeWorker() { delete progress; }
 
     void Execute (const AsyncProgressWorker::ExecutionProgress& progress) {
 
@@ -245,17 +229,28 @@ namespace libav_decoder {
         // if(videoq.size > MAX_VIDEOQ_SIZE || audioq.size > MAX_AUDIOQ_SIZE) {
         if(videoq.size > MAX_VIDEOQ_SIZE) {
           // fprintf(stderr, "max video queue size (%d).. waiting 100ms\n", videoq.size);
-          progress.Signal();
+          if(queueReady==0){
+            queueReady=1;
+            fprintf(stderr, "c+: ready...\n");
+            progress.Signal();
+          }
           Sleep(100); //sleep for a second?
           continue;
         }
 
         if(readFrame = av_read_frame(pFormatCtx, packet) < 0) {
           if(pFormatCtx->pb->error == 0) {
-            //fprintf(stderr, "no error.. sleeping\n");
-            continue;
+            fprintf(stderr, "finished?\n");
+            // Nan::HandleScope scope;
+            // v8::Local<v8::Value> argv[] = {
+            //   Nan::New<Integer>(1)
+            // };
+            // callback->Call(1, argv);
+            // fprintf(stderr, "\n----\n------- FINISHED DECODING --- \n\n" );
+
+            // break;
     	       //Sleep(100); /* no error; wait for user input */
-             //continue;
+             break;
           } else {
     	       break;
           }
@@ -269,58 +264,27 @@ namespace libav_decoder {
           // av_free_packet(packet);
         } else {
           fprintf(stderr, "free: %d\n", i);
-          // av_free_packet(packet);
+          av_free_packet(packet);
         }
         // fprintf(stderr, "read packet: %d\n", readFrame);
         // if(!packet){
           // break;
         // }
       }
+      fprintf(stderr, "done\n");
 
     }
 
     void Destroy(){
-      // avformat_close_input(&pFormatCtx);
+      fprintf(stderr, "destroy\n");
     }
-    void HandleProgressCallback(const char *data, size_t size) {
-      Nan::HandleScope scope;
-      Local<Object> obj = Nan::New<Object>();
-      obj->Set(Nan::New<String>("current").ToLocalChecked(), Nan::New<Integer>(frameIndex));
-      obj->Set(Nan::New<String>("total").ToLocalChecked(), Nan::New<Number>(totalFrames));
-      obj->Set(Nan::New<String>("queue_size").ToLocalChecked(), Nan::New<Integer>(videoq.nb_packets));
-      v8::Local<v8::Value> argv[] = {obj};
+    void HandleProgressCallback(const char *data, size_t count) {
+      fprintf(stderr, "ProgressCallback\n");
+      Local<Value> argv[] = {
+        Nan::New<String>("dataAvailable").ToLocalChecked()
+      };
       progress->Call(1, argv);
     }
-    void HandleOKCallback(){
-
-      fprintf(stderr, "\n----\n------- FINISHED DECODING --- \n\n" );
-
-      Local<Object> obj = Nan::New<Object>();
-      obj->Set(Nan::New<String>("current").ToLocalChecked(), Nan::New<Integer>(frameIndex));
-      obj->Set(Nan::New<String>("total").ToLocalChecked(), Nan::New<Number>(totalFrames));
-
-      Nan::HandleScope scope;
-      v8::Local<v8::Value> argv[] = {
-        obj
-        // Nan::CopyBuffer((char *)yuv->avY, yuv->size_y).ToLocalChecked(),
-        // Nan::CopyBuffer((char *)yuv->avU, yuv->size_u).ToLocalChecked(),
-        // Nan::CopyBuffer((char *)yuv->avV, yuv->size_v).ToLocalChecked(),
-        // Nan::New<Integer>(yuv->pitchY),
-        // Nan::New<Integer>(yuv->pitchU),
-        // Nan::New<Integer>(yuv->pitchV),
-        // Nan::New<Number>(vpts)
-      };
-      callback->Call(1, argv);
-    }
-    // void HandleProgressCallback(const char *data, size_t size) {
-    //   Nan::HandleScope scope;
-    //   fprintf(stderr, "\n----\n------- PROGRESS: %d of %d \n\n",  frameIndex, pFormatCtx->streams[videoStream]->nb_frames);
-    //   v8::Local<v8::Value> argv[] = {
-    //     Nan::New<Integer>(frameIndex),
-    //     Nan::New<Integer>((int)pFormatCtx->streams[videoStream]->nb_frames)
-    //   };
-    //   progress->Call(1, argv);
-    // }
 
    private:
     Callback *progress;
@@ -348,10 +312,13 @@ namespace libav_decoder {
     Callback *callback = new Callback(info[1].As<Function>());
     fprintf(stderr, "Open: %s\n", in);
 
+    pFormatCtx = NULL;
+
     if(avformat_open_input(&pFormatCtx, in, NULL, NULL)!=0){
       fprintf(stderr, "Could not open %s\n", in);
       exit(-1);
     }
+    fprintf(stderr, "open success\n");
 
     // Retrieve stream information
     if(avformat_find_stream_info(pFormatCtx, NULL)<0){
@@ -378,7 +345,7 @@ namespace libav_decoder {
     }
 
     //dump input stream infos
-    // av_dump_format(pFormatCtx, 0, in, 0);
+    av_dump_format(pFormatCtx, 0, in, 0);
 
     pCodecCtxOrig = pFormatCtx->streams[videoStream]->codec;
 
@@ -395,31 +362,41 @@ namespace libav_decoder {
     packet_queue_init(&videoq);
 
     // fprintf(stderr, "codec: %dx%d %dx%d\n", pCodecCtxOrig->width, pCodecCtxOrig->height, pCodecCtxOrig->coded_width, pCodecCtxOrig->coded_height);
-
+    queueReady=0;
 
 
     Local<Object> obj = Nan::New<Object>();
     obj->Set(Nan::New<String>("filename").ToLocalChecked(), Nan::New<String>(in).ToLocalChecked());
+    obj->Set(Nan::New<String>("frames").ToLocalChecked(), Nan::New<Number>(pFormatCtx->streams[videoStream]->nb_frames));
     obj->Set(Nan::New<String>("duration").ToLocalChecked(), Nan::New<Number>(atof(time_value_string(val_str, sizeof(val_str), pFormatCtx->duration))));
     obj->Set(Nan::New<String>("width").ToLocalChecked(), Nan::New<Integer>(pCodecCtxOrig->width));
     obj->Set(Nan::New<String>("height").ToLocalChecked(), Nan::New<Integer>(pCodecCtxOrig->height));
     obj->Set(Nan::New<String>("coded_width").ToLocalChecked(), Nan::New<Integer>(pCodecCtxOrig->coded_width));
     obj->Set(Nan::New<String>("coded_height").ToLocalChecked(), Nan::New<Integer>(pCodecCtxOrig->coded_height));
     obj->Set(Nan::New<String>("aspect_ratio").ToLocalChecked(), Nan::New<Number>(aspect_ratio));
-    obj->Set(Nan::New<String>("frame_rate").ToLocalChecked(), Nan::New<Number>(pFormatCtx->streams[videoStream]->r_frame_rate.num/pFormatCtx->streams[videoStream]->r_frame_rate.den));
+    float fr = pFormatCtx->streams[videoStream]->r_frame_rate.num/pFormatCtx->streams[videoStream]->r_frame_rate.den;
+    fprintf(stderr, "frame rate: %f / %f = %f\n", pFormatCtx->streams[videoStream]->r_frame_rate.num, pFormatCtx->streams[videoStream]->r_frame_rate.den, fr);
+    obj->Set(Nan::New<String>("frame_rate").ToLocalChecked(), Nan::New<Number>((float)fr));
+
+    obj->Set(Nan::New<String>("frame_rate_n").ToLocalChecked(), Nan::New<Number>(pFormatCtx->streams[videoStream]->r_frame_rate.num));
+    obj->Set(Nan::New<String>("frame_rate_d").ToLocalChecked(), Nan::New<Number>(pFormatCtx->streams[videoStream]->r_frame_rate.den));
+
+    obj->Set(Nan::New<String>("time_base_n").ToLocalChecked(), Nan::New<Number>(pFormatCtx->streams[videoStream]->time_base.num));
+    obj->Set(Nan::New<String>("time_base_d").ToLocalChecked(), Nan::New<Number>(pFormatCtx->streams[videoStream]->time_base.den));
 
     Nan:: HandleScope scope;
     Local<Value> argv[] = {obj};
     callback->Call(1, argv);
   }
   NAN_METHOD(Emitter::Decode) {
+
     Callback *progress = new Callback(info[0].As<v8::Function>());
     Callback *callback = new Callback(info[1].As<v8::Function>());
 
-
-    //!!uv_queue_work(uv_default_loop(), &request->req, ec_decode_buffer_async, (uv_after_work_cb)ec_decode_buffer_after);
-
     AsyncQueueWorker(new DecodeWorker(callback, progress));
+
+    // info.GetReturnValue().Set(Nan::New<String>("OK").ToLocalChecked());
+
   }
   NAN_METHOD(Emitter::Destroy) {
     // shouldQuit=true;
@@ -430,6 +407,7 @@ namespace libav_decoder {
     Callback *callback = new Callback(info[0].As<v8::Function>());
     AsyncQueueWorker(new DecodeReader(callback));
   }
+
 
 
   void decoder_init(Handle<Object> target){
